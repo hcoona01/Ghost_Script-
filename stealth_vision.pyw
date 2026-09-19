@@ -7,35 +7,42 @@ import tkinter as tk
 from PIL import ImageGrab
 import ctypes 
 
-#dpi awareness
+# DPI awareness
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception:
-    ctypes.windll.user32.SetProcessDPIAware()
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
-#cloud congif
+# Cloud config
 API_URL = "https://openrouter.ai/api/v1/chat/completions" 
+API_KEY = "Khudki API key use kro" 
 
-#key bhai saab
-API_KEY = "Your Api Key" 
+# List of reliable free vision models for fallback rotation
+FREE_VISION_MODELS = [
+    "nex-agi/nex-n2.5-pro:free",
+    "inclusionai/ling-3.0-flash-vl:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "google/gemma-4-31b-it:free",
+    "qwen/qwen3.8-27b:free"
+]
 
-#model bhai saab
-MODEL = "openrouter/free" 
-
-#stealth overlay
+# Stealth overlay
 class StealthOverlay:
     def __init__(self):
         self.root = tk.Tk()
         self.root.overrideredirect(True) 
         self.root.attributes("-topmost", True) 
         
-        #Multitasking
+        # Multitasking windows flags
         WS_EX_NOACTIVATE = 0x08000000
         hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
         style = ctypes.windll.user32.GetWindowLongW(hwnd, -20)
         ctypes.windll.user32.SetWindowLongW(hwnd, -20, style | WS_EX_NOACTIVATE)
         
-       #ghost gayab invisible
+        # Invisible text background hack
         self.root.attributes("-alpha", 1.0) 
         self.root.wm_attributes("-transparentcolor", '#000000') 
         
@@ -53,66 +60,96 @@ class StealthOverlay:
         self.is_visible = False
 
     def log(self, msg):
+        self.root.after(0, self._safe_log, msg)
+
+    def _safe_log(self, msg):
         self.text.config(state=tk.NORMAL)
         self.text.delete(1.0, tk.END)
         self.text.insert(tk.END, msg)
         self.text.config(state=tk.DISABLED)
-        # Result aane par text visible
         self.text.config(fg='#cbcbcb') 
         self.is_visible = True
 
     def toggle(self):
+        self.root.after(0, self._safe_toggle)
+
+    def _safe_toggle(self):
         if self.is_visible:
-            self.text.config(fg='#000000') # Gayab
+            self.text.config(fg='#000000') # Hide
             self.is_visible = False
         else:
-            self.text.config(fg='#cbcbcb') # Wapas visible
+            self.text.config(fg='#cbcbcb') # Show
             self.is_visible = True
 
-#brain
+# Screen processor with automatic rate-limit failover
 def process_screen(overlay):
-    if not overlay.is_visible:
-        overlay.log("Scan")
+    overlay.log("Scanning...")
 
     try:
+        # Grab screenshot and compress to save API bandwidth
         ss = ImageGrab.grab()
         img_byte_arr = io.BytesIO()
-        ss.save(img_byte_arr, format='PNG')
+        ss.convert('RGB').save(img_byte_arr, format='JPEG', quality=70)
         base64_str = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
 
         headers = {
             "Authorization": f"Bearer {API_KEY}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://localhost", 
+            "X-Title": "Vision Assistant"
         }
 
-        payload = {
-            "model": MODEL,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Give ONLY the final correct answer option. No explanation, no extra words. Max 10 words."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_str}"}}
-                    ]
-                }
-            ]
-        }
+        # Iterate through the available free models if one fails or hits rate limits
+        for index, model_name in enumerate(FREE_VISION_MODELS):
+            short_name = model_name.split('/')[-1].split(':')[0]
+            if index > 0:
+                overlay.log(f"Retrying with {short_name}...")
+
+            payload = {
+                "model": model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Give ONLY the final correct answer option or short answer. No explanation, no extra words. Max 10 words."},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_str}"}}
+                        ]
+                    }
+                ]
+            }
+            
+            try:
+                response = requests.post(API_URL, headers=headers, json=payload, timeout=25)
+                
+                # If rate-limited (429) or bad gateway/overloaded (502/503), try next model
+                if response.status_code in [429, 502, 503]:
+                    continue 
+                
+                if response.status_code == 200:
+                    res_data = response.json()
+                    if 'choices' in res_data and len(res_data['choices']) > 0:
+                        result = res_data['choices'][0]['message']['content']
+                        overlay.log(result.strip())
+                        return # Success, exit function
+                else:
+                    # Generic error fallback to next model
+                    continue
+
+            except (requests.exceptions.Timeout, requests.exceptions.RequestException):
+                # Connection timeout or network blip, try next backup model
+                continue
         
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=45)
-        if response.status_code == 200:
-            result = response.json()['choices'][0]['message']['content']
-            overlay.log(result.strip())
-        else:
-            # Detailed Error handling 
-            error_msg = response.json().get('error', {}).get('message', 'Unknown Error')
-            overlay.log(f"API Error {response.status_code}: {error_msg[:40]}...")
+        # If the loop finishes without returning, all models failed
+        overlay.log("All free models busy.")
 
     except Exception as e:
-        overlay.log("Connection Failed.")
+        overlay.log(f"Error: {str(e)[:30]}")
 
-#hotieeee key binds
+# Hotkeys
 if __name__ == "__main__":
     ui = StealthOverlay()
+    # Alt + 4 to capture and answer
     keyboard.add_hotkey('alt+4', lambda: threading.Thread(target=process_screen, args=(ui,), daemon=True).start())
+    # Alt + 3 to toggle visibility manually
     keyboard.add_hotkey('alt+3', ui.toggle)
     ui.root.mainloop()
